@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <title>Színházi Szövegkövető (Real-time)</title>
+    <style>
+        body { 
+            background-color: black; 
+            color: white; 
+            font-family: sans-serif; 
+            font-size: 32px; /* Jól olvasható méret a pultból */
+            padding: 40px; 
+            line-height: 1.8; 
+            margin: 0;
+            padding-bottom: 50vh; /* A képernyő közepén tartja a legutolsó sort is */
+        }
+        .green { color: #00ff00; }
+        #status { 
+            font-size: 16px; 
+            color: #888; 
+            position: fixed; 
+            top: 10px; 
+            right: 20px; 
+            background: rgba(0,0,0,0.8);
+            padding: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            z-index: 100;
+        }
+        .word { transition: color 0.1s; }
+    </style>
+</head>
+<body>
+    <div id="status">Kattints ide a mikrofon indításához!</div>
+    <div id="text-container"></div>
+
+    <script>
+        // 1. IDE ILLESZD BE A SZÖVEGKÖNYVET
+        const scriptText = "Jó reggelt kívánok! Bocsánat a késésért, de egyszerűen nem jött a busz. Semmi baj, kérem foglaljon helyet. A mai megbeszélés témája a világítás. És ez itt egy új bekezdés, hátha ugrik a színész egy oldalt.";
+        
+        // Szöveg előkészítése (logikai és megjelenítési tömbök)
+        const cleanText = scriptText.toLowerCase().replace(/[.,!?]/g, '');
+        const logicalWords = cleanText.split(/\s+/);
+        const displayWords = scriptText.split(/\s+/);
+        let currentPos = -1;
+
+        const container = document.getElementById('text-container');
+        
+        // Képernyő frissítése és automatikus görgetés
+        function render() {
+            container.innerHTML = displayWords.map((word, i) => 
+                `<span class="word ${i <= currentPos ? 'green' : ''}" id="word-${i}">${word}</span>`
+            ).join(' ');
+            
+            const activeWord = document.getElementById(`word-${currentPos}`);
+            if (activeWord) {
+                activeWord.scrollIntoView({behavior: "smooth", block: "center"});
+            }
+        }
+
+        // Levenshtein-távolság a Fuzzy Matching-hoz (hibatűrés pl. tévesztésnél)
+        function levenshtein(a, b) {
+            if(a.length === 0) return b.length;
+            if(b.length === 0) return a.length;
+            var matrix = [];
+            for(let i = 0; i <= b.length; i++) matrix[i] = [i];
+            for(let j = 0; j <= a.length; j++) matrix[0][j] = j;
+            for(let i = 1; i <= b.length; i++){
+                for(let j = 1; j <= a.length; j++){
+                    if(b.charAt(i-1) === a.charAt(j-1)) {
+                        matrix[i][j] = matrix[i-1][j-1];
+                    } else {
+                        matrix[i][j] = Math.min(matrix[i-1][j-1] + 1, Math.min(matrix[i][j-1] + 1, matrix[i-1][j] + 1));
+                    }
+                }
+            }
+            return matrix[b.length][a.length];
+        }
+
+        function similarity(s1, s2) {
+            let longer = s1.length > s2.length ? s1 : s2;
+            let shorter = s1.length > s2.length ? s2 : s1;
+            if (longer.length === 0) return 1.0;
+            return (longer.length - levenshtein(longer, shorter)) / parseFloat(longer.length);
+        }
+
+        // Keresőmotor
+        function searchPosition(spokenText) {
+            const words = spokenText.trim().toLowerCase().split(/\s+/);
+            if (words.length === 0 || words[0] === "") return;
+            
+            // Csak a kimondott mondat utolsó 4 szavát nézzük (Csúszóablak)
+            const windowWords = words.slice(-4);
+            const searchPhrase = windowWords.join(" ");
+            const windowSize = windowWords.length;
+            
+            let bestMatchRatio = 0;
+            let bestIndex = currentPos;
+
+            // Végigpásztázzuk a teljes szövegkönyvet az ugrások és visszalépések miatt
+            for (let i = 0; i <= logicalWords.length - windowSize; i++) {
+                const scriptSlice = logicalWords.slice(i, i + windowSize).join(" ");
+                const matchRatio = similarity(searchPhrase, scriptSlice);
+                
+                if (matchRatio > bestMatchRatio) {
+                    bestMatchRatio = matchRatio;
+                    bestIndex = i + windowSize - 1;
+                }
+            }
+
+            // Ha 65% feletti az egyezés (elbírja az apró hibákat)
+            if (bestMatchRatio > 0.65) {
+                currentPos = bestIndex;
+                render();
+            }
+        }
+
+        // Kezdeti kirajzolás
+        render();
+
+        // 2. WebkiSpeech API (Real-time felismerés) beállítása
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'hu-HU';
+        recognition.continuous = true;
+        recognition.interimResults = true; // <-- Ez biztosítja, hogy azonnal küldje a szavakat, nincs lag!
+
+        recognition.onresult = (event) => {
+            // A legfrissebb felismert mondattöredéket küldjük be a keresőbe
+            const currentTranscript = event.results[event.resultIndex][0].transcript;
+            searchPosition(currentTranscript);
+        };
+
+        const statusEl = document.getElementById('status');
+        
+        recognition.onstart = () => { 
+            statusEl.innerText = 'Mikrofon ÉLES. Beszélj!'; 
+            statusEl.style.color = '#00ff00';
+        };
+        recognition.onerror = (e) => { 
+            statusEl.innerText = "Hiba: " + e.error; 
+            statusEl.style.color = 'red';
+        };
+        
+        // A böngésző hajlamos csend esetén leállítani a figyelést, ezzel azonnal újraindítjuk
+        recognition.onend = () => { 
+            try { recognition.start(); } catch(e) {}
+        }; 
+
+        // Indítás gomb (a böngésző biztonsági okokból csak kattintásra enged mikrofont használni)
+        statusEl.onclick = () => { 
+            try {
+                recognition.start(); 
+                statusEl.onclick = null; 
+            } catch(e) {}
+        };
+    </script>
+</body>
+</html>
